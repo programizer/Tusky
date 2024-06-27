@@ -60,11 +60,11 @@ class AboutActivity : BottomSheetActivity() {
                     account.domain,
                     instanceInfo.version
                 )
+
                 binding.accountInfoTitle.show()
                 binding.accountInfo.show()
             }
         }
-
         if (BuildConfig.CUSTOM_INSTANCE.isBlank()) {
             binding.aboutPoweredByTusky.hide()
         }

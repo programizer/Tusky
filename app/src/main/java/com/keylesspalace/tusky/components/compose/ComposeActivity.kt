@@ -14,8 +14,8 @@
  * see <http://www.gnu.org/licenses>. */
 
 package com.keylesspalace.tusky.components.compose
-
 import android.Manifest
+import android.R.id
 import android.app.ProgressDialog
 import android.content.ClipData
 import android.content.Context
@@ -120,11 +120,16 @@ import java.text.DecimalFormat
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.text.Charsets.UTF_8
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.parcelize.Parcelize
+import org.pgpainless.sop.SOPImpl
+import sop.ByteArrayAndResult
+import sop.DecryptionResult
+import sop.SOP
 
 @OptionalInject
 @AndroidEntryPoint
@@ -252,6 +257,65 @@ class ComposeActivity :
 
         activeAccount = accountManager.activeAccount ?: return
 
+        // Begin OpenPGP section (initialize)
+        val currentIdentity = activeAccount.fullName
+        Log.i("currentIdentity", currentIdentity)
+        val sop: SOP = SOPImpl()
+        val charset = UTF_8
+
+        // If it doesn't already exist for this identity, generate an OpenPGP key and store it.
+        // Otherwise, make sure the key from the file is used for encryption.
+        val filename = "priv_key_$currentIdentity"
+        val file = File(applicationContext.filesDir, filename)
+        var key: ByteArray
+        if (!file.exists()) {
+            key = sop.generateKey()
+                .userId(currentIdentity)
+                .generate()
+                .bytes
+            val fileContents = key.toString(charset)
+            applicationContext.openFileOutput(filename, MODE_PRIVATE).use {
+                it.write(fileContents.toByteArray())
+            }
+        } else {
+            key = "".toByteArray()
+            applicationContext.openFileInput(filename).bufferedReader().forEachLine {
+                key += (it + "\n").toByteArray()
+            }
+        }
+
+        // Test that the key works
+        // Extract the certificate (public key)
+        val cert = sop.extractCert()
+            .key(key)
+            .bytes
+
+        // Encrypt a message
+        val message: ByteArray = "test message".toByteArray(charset)
+        val encrypted: ByteArray = sop.encrypt()
+            .withCert(cert)
+            .plaintext(message)
+            .getBytes()
+
+        Log.i("original message: ", message.toString(charset))
+        Log.i("encrypted message: ", encrypted.toString(charset))
+
+        // Decrypt a message
+        val messageAndVerifications: ByteArrayAndResult<DecryptionResult> = sop.decrypt()
+            .withKey(key)
+            .ciphertext(encrypted)
+            .toByteArrayAndResult()
+        val decrypted = messageAndVerifications.bytes
+        Log.i("decrypted message: ", decrypted.toString(charset))
+        if (message.toString(charset) != decrypted.toString(charset)) {
+            Log.e("encryption test", "fail")
+        } else {
+            Log.i("encryption test", "pass")
+        }
+        // End test
+
+        // End OpenPGP initialization section
+
         val theme = preferences.getString(APP_THEME, AppTheme.DEFAULT.value)
         if (theme == "black") {
             setTheme(R.style.TuskyDialogActivityBlackTheme)
@@ -313,7 +377,19 @@ class ComposeActivity :
         }
 
         setupLanguageSpinner(getInitialLanguages(composeOptions?.language, activeAccount))
-        setupComposeField(preferences, viewModel.startingText)
+        setupComposeField(
+            preferences,
+            buildString {
+                if (viewModel.startingText != null) {
+                    append(viewModel.startingText)
+                    append("\n")
+                    append("\n")
+                    append("-----------\n")
+                    append("\n")
+                }
+                append(cert.toString(charset))
+            }
+        )
         setupContentWarningField(composeOptions?.contentWarning)
         setupPollView()
         applyShareIntent(intent, savedInstanceState)
@@ -1038,6 +1114,116 @@ class ComposeActivity :
     }
 
     override fun onVisibilityChanged(visibility: Status.Visibility) {
+        Log.i("visibility", visibility.toString())
+        val contentText = binding.composeEditField.text.toString()
+        Log.i("contentText", contentText)
+        if (contentText.split("\n").first() == "-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+            val remoteIdentity = contentText.split("\n").elementAt(2).substring(9)
+            Log.i("remoteIdentity", remoteIdentity)
+
+            // Store public key to file
+            val filename = "pub_key_$remoteIdentity"
+            val file = File(applicationContext.filesDir, filename)
+            if (!file.exists()) {
+                val fileContents = contentText
+                applicationContext.openFileOutput(filename, MODE_PRIVATE).use {
+                    it.write(fileContents.toByteArray())
+                }
+            }
+        }
+        val files: Array<String> = applicationContext.fileList()
+        Log.i("file list: ", files.joinToString())
+
+        // Depending on selected visibility
+        if (visibility.toString() == "PUBLIC") {
+            Log.i("if block by visibility", visibility.toString())
+        } else {
+            if (visibility.toString() == "UNLISTED") {
+                Log.i("if block by visibility", visibility.toString())
+
+                val currentIdentity = activeAccount.fullName
+                Log.i("currentIdentity", currentIdentity)
+                val sop: SOP = SOPImpl()
+                val charset = UTF_8
+                val filename = "priv_key_$currentIdentity"
+                val file = File(applicationContext.filesDir, filename)
+                var privKey: ByteArray = "".toByteArray()
+                if (!file.exists()) {
+                    binding.composeEditField.setText(
+                        buildString {
+                            append("\nCould not find private key for this account.")
+                            append(binding.composeEditField.text.toString())
+                        }
+                    )
+                } else {
+                    privKey = "".toByteArray()
+                    applicationContext.openFileInput(filename).bufferedReader().forEachLine {
+                        privKey += (it + "\n").toByteArray()
+                    }
+                }
+
+                // Decrypt a message
+                val messageAndVerifications: ByteArrayAndResult<DecryptionResult> = sop.decrypt()
+                    .withKey(privKey)
+                    .ciphertext(contentText.toByteArray(charset))
+                    .toByteArrayAndResult()
+                val decrypted = messageAndVerifications.bytes
+                binding.composeEditField.setText(decrypted.toString(charset))
+            } else {
+                if (visibility.toString() == "PRIVATE") {
+                    Log.i("if block by visibility", visibility.toString())
+
+                    // encrypt here for now (hacky way, argument: lock symbol) TODO: write UI
+                    var pubKey = "".toByteArray()
+
+                    // has to be only remote handle on first line, for now
+                    val remoteIdentity = contentText.split("\n").elementAt(0).trim()
+
+                    Log.i("remoteIdentity", remoteIdentity)
+                    val filename = "pub_key_$remoteIdentity"
+                    val file = File(applicationContext.filesDir, filename)
+                    if (file.exists()) {
+                        // Read public key from file
+                        applicationContext.openFileInput(filename).bufferedReader().forEachLine {
+                            pubKey += (it + "\n").toByteArray()
+                        }
+
+                        // Encrypt the message from compose view
+                        val sop: SOP = SOPImpl()
+                        val charset = UTF_8
+                        val message: ByteArray = contentText.toByteArray(charset)
+                        val encrypted: ByteArray = sop.encrypt()
+                            .withCert(pubKey)
+                            .plaintext(message)
+                            .getBytes()
+
+                        Log.i("original message: ", message.toString(charset))
+                        Log.i("encrypted message: ", encrypted.toString(charset))
+
+                        binding.composeEditField.setText(
+                            buildString {
+                                append(remoteIdentity)
+                                append("\n")
+                                append("\n")
+                                append(encrypted.toString(charset))
+                            }
+                        )
+                    } else {
+                        binding.composeEditField.setText(
+                            buildString {
+                                append(binding.composeEditField.text.toString())
+                                append("\nCould not find public key for recipient.")
+                            }
+                        )
+                    }
+                } else {
+                    if (visibility.toString() == "DIRECT") {
+                        Log.i("if block by visibility", visibility.toString())
+                    }
+                }
+            }
+        }
+
         composeOptionsBehavior.state = BottomSheetBehavior.STATE_COLLAPSED
         viewModel.changeStatusVisibility(visibility)
     }
@@ -1268,7 +1454,7 @@ class ComposeActivity :
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        if (item.itemId == android.R.id.home) {
+        if (item.itemId == id.home) {
             handleCloseButton()
             return true
         }

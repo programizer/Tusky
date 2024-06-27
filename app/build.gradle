@@ -173,7 +173,8 @@ dependencies {
 
     implementation libs.bundles.filemojicompat
 
-    implementation libs.bouncycastle
+    implementation libs.pgpainless.core
+    implementation libs.pgpainless.pgpainless.sop
     implementation libs.unified.push
 
     implementation libs.bundles.xmldiff
